@@ -42,7 +42,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "[START] ELITE HUNTER 💀"
+echo "[START] CREDS HUNTER 💀"
 
 sanitize_filename() {
     echo "$1" | sed 's|https\?://||' | sed 's|[^a-zA-Z0-9]|_|g'
@@ -250,7 +250,7 @@ cat <<EOF > "$REPORT"
 <html>
 <head>
 <meta charset="UTF-8">
-<title>CredsHunter Elite Report</title>
+<title>CredsHunter Report</title>
 
 <style>
 body {
@@ -321,7 +321,7 @@ function searchDomain() {
 
 <body>
 
-<h1>💀 CredsHunter Elite Interactive Report</h1>
+<h1>💀 CredsHunter Interactive Report</h1>
 <p>Generated: $(date)</p>
 
 <input type="text" id="search" onkeyup="searchDomain()" placeholder="Search domain / endpoint / secret...">
