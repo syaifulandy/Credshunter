@@ -42,7 +42,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "[START] CREDS HUNTER 💀"
+echo "[START] CREDS HUNTER"
 
 sanitize_filename() {
     echo "$1" | sed 's|https\?://||' | sed 's|[^a-zA-Z0-9]|_|g'
@@ -239,7 +239,7 @@ END {
 echo "[GLOBAL] grouped output: ALL-SECRETS-GROUPED.txt"
 
 
-echo "[✓] DONE - HUNT READY 💀"
+echo "[✓] DONE - HUNT READY"
 
 echo "[REPORT] generating INTERACTIVE dashboard..."
 
@@ -321,7 +321,7 @@ function searchDomain() {
 
 <body>
 
-<h1>💀 CredsHunter Interactive Report</h1>
+<h1>CredsHunter Interactive Report</h1>
 <p>Generated: $(date)</p>
 
 <input type="text" id="search" onkeyup="searchDomain()" placeholder="Search domain / endpoint / secret...">
