@@ -15,13 +15,26 @@ while getopts "i:t:e:" opt; do
 done
 
 
+
+filter_exclude() {
+    if [[ -n "$EXCLUDE_REGEX" ]]; then
+        grep -Ev "$EXCLUDE_REGEX"
+    else
+        cat
+    fi
+}
+
+export -f filter_exclude
+
+
 EXCLUDE_REGEX=""
 
 if [[ -f "$EXCLUDE_FILE" ]]; then
     echo "[INFO] loading exclude list: $EXCLUDE_FILE"
-
-    EXCLUDE_REGEX=$(cat "$EXCLUDE_FILE" | tr '\n' '|' | sed 's/|$//')
+    EXCLUDE_REGEX=$(sed 's/^[ \t]*//;s/[ \t]*$//' "$EXCLUDE_FILE" | grep -v '^$' | tr '\n' '|' | sed 's/|$//')
 fi
+
+export EXCLUDE_REGEX
 
 
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -70,6 +83,7 @@ crawl_target() {
     echo "[EXTRACT] $DOMAIN"
 
     # ✅ extract semua URL
+    
     jq -r '
       .request.endpoint?,
       .url?,
@@ -77,20 +91,17 @@ crawl_target() {
     ' "$FILE" 2>/dev/null \
     | grep -v '^null$' \
     | sort -u \
-    | {
-        if [[ -n "$EXCLUDE_REGEX" ]]; then
-            echo "$link" | grep -Eq "$EXCLUDE_REGEX" && continue
-        else
-            cat
-        fi
-    } \
+    | filter_exclude \
     > "$OUTPUT_DIR/$DOMAIN-urls.txt"
+
 
     # ✅ PARAMETER MINING 🔥
     grep -E "\?.*=" "$OUTPUT_DIR/$DOMAIN-urls.txt" \
+    | filter_exclude \
         > "$OUTPUT_DIR/$DOMAIN-params.txt"
 
     sed -E 's/\?.*/?FUZZ=1/' "$OUTPUT_DIR/$DOMAIN-params.txt" \
+        | filter_exclude \
         | sort -u > "$OUTPUT_DIR/$DOMAIN-fuzz.txt"
 
     echo "[PARAM] $(wc -l < "$OUTPUT_DIR/$DOMAIN-params.txt") param found"
@@ -101,6 +112,7 @@ crawl_target() {
     COUNT=0
 
     while read -r link; do
+        echo "$link" | filter_exclude | grep -q . || continue
 
         [[ "$link" =~ \.(png|jpg|jpeg|gif|css|svg|woff|ico)$ ]] && continue
 
@@ -122,17 +134,12 @@ crawl_target() {
     done < "$OUTPUT_DIR/$DOMAIN-urls.txt"
 
     # ✅ ENDPOINT PARSING (UPGRADED REGEX)
-    
+
     grep -rhoE "(https?://[^\"' ]+|/[a-zA-Z0-9/_-]{3,})" "$OUTPUT_DIR/$DOMAIN" 2>/dev/null \
     | grep -vE "\.(png|jpg|css|svg)" \
-    | {
-        if [[ -n "$EXCLUDE_REGEX" ]]; then
-            grep -Ev "$EXCLUDE_REGEX"
-        else
-            cat
-        fi
-    } \
+    | filter_exclude \
     | sort -u > "$OUTPUT_DIR/$DOMAIN-endpoints.txt"
+
 
 
     # ✅ HIGH VALUE 🔥
@@ -141,9 +148,12 @@ crawl_target() {
         > "$OUTPUT_DIR/$DOMAIN-highvalue.txt"
 
     # ✅ REQUEST LIST (BURP/FFUF READY) 🔥
+    > "$OUTPUT_DIR/$DOMAIN-requests.txt"
     while read -r url; do
+        echo "$url" | filter_exclude | grep -q . || continue
         echo "GET $url" >> "$OUTPUT_DIR/$DOMAIN-requests.txt"
     done < "$OUTPUT_DIR/$DOMAIN-urls.txt"
+
 
     # ✅ SENSITIVE DATA 🔥
 
@@ -185,4 +195,3 @@ export OUTPUT_DIR sanitize_filename
 cat "$INPUT_FILE" | xargs -P $THREADS -I {} bash -c 'crawl_target "$@"' _ {}
 
 echo "[✓] DONE - HUNT READY 💀"
-``
