@@ -56,8 +56,12 @@ export -f sanitize_filename
 crawl_target() {
 
     URL=$1
-    DOMAIN=$(echo $URL | sed 's|https\?://||' | cut -d/ -f1)
-    FILE="$OUTPUT_DIR/$DOMAIN.jsonl"
+    DOMAIN=$(echo $URL | sed 's|https\?://||' | cut -d/ -f1)    
+    TARGET_DIR="$OUTPUT_DIR/$DOMAIN"
+    mkdir -p "$TARGET_DIR/files"
+
+    FILE="$TARGET_DIR/katana.jsonl"
+
 
     echo "[RUNNING] $DOMAIN"
 
@@ -92,11 +96,10 @@ crawl_target() {
     | grep -v '^null$' \
     | sort -u \
     | filter_exclude \
-    > "$OUTPUT_DIR/$DOMAIN-urls.txt"
-
+    > "$TARGET_DIR/urls.txt"
 
     # ✅ PARAMETER MINING 🔥
-    grep -E "\?.*=" "$OUTPUT_DIR/$DOMAIN-urls.txt" \
+    grep -E "\?.*=" "$TARGET_DIR/urls.txt" \
     | filter_exclude \
         > "$OUTPUT_DIR/$DOMAIN-params.txt"
 
@@ -127,11 +130,11 @@ crawl_target() {
         STATUS=$(curl -m 10 -s -o /dev/null -w "%{http_code}" "$link")
 
         if [[ "$STATUS" == "200" ]]; then
-            curl -s "$link" -o "$OUTPUT_DIR/$DOMAIN/$NAME$EXT"
+            curl -s "$link" -o "$TARGET_DIR/files/$NAME$EXT"
             ((COUNT++))
         fi
 
-    done < "$OUTPUT_DIR/$DOMAIN-urls.txt"
+    done < "$TARGET_DIR/urls.txt"
 
     # ✅ ENDPOINT PARSING (UPGRADED REGEX)
 
@@ -152,7 +155,7 @@ crawl_target() {
     while read -r url; do
         echo "$url" | filter_exclude | grep -q . || continue
         echo "GET $url" >> "$OUTPUT_DIR/$DOMAIN-requests.txt"
-    done < "$OUTPUT_DIR/$DOMAIN-urls.txt"
+    done < "$TARGET_DIR/urls.txt"
 
 
     # ✅ SENSITIVE DATA 🔥
@@ -181,10 +184,10 @@ crawl_target() {
 
 
     echo "[DONE] $DOMAIN"
-    echo "  ├─ URLs        : $(wc -l < "$OUTPUT_DIR/$DOMAIN-urls.txt")"
-    echo "  ├─ params      : $(wc -l < "$OUTPUT_DIR/$DOMAIN-params.txt")"
-    echo "  ├─ endpoints   : $(wc -l < "$OUTPUT_DIR/$DOMAIN-endpoints.txt")"
-    echo "  ├─ highvalue   : $(wc -l < "$OUTPUT_DIR/$DOMAIN-highvalue.txt")"
+    echo "  ├─ URLs        : $(wc -l < "$TARGET_DIR/urls.txt")"
+    echo "  ├─ params      : $(wc -l < "$TARGET_DIR/params.txt")"
+    echo "  ├─ endpoints   : $(wc -l < "$TARGET_DIR/endpoints.txt")"
+    echo "  ├─ highvalue   : $(wc -l < "$TARGET_DIR/highvalue.txt")"
     echo "  ├─ files       : $COUNT"
     echo "-----------------------------"
 }
@@ -194,4 +197,140 @@ export OUTPUT_DIR sanitize_filename
 
 cat "$INPUT_FILE" | xargs -P $THREADS -I {} bash -c 'crawl_target "$@"' _ {}
 
+
+echo "[GLOBAL] merging all secrets"
+
+> "$OUTPUT_DIR/ALL-SECRETS.txt"
+
+find "$OUTPUT_DIR" -name "*-secrets.txt" | while read -r file; do
+    cat "$file" >> "$OUTPUT_DIR/ALL-SECRETS-RAW.txt"
+done
+
+sort -u "$OUTPUT_DIR/ALL-SECRETS-RAW.txt" > "$OUTPUT_DIR/ALL-SECRETS.txt"
+
+rm "$OUTPUT_DIR/ALL-SECRETS-RAW.txt"
+
+echo "[GLOBAL] done: $OUTPUT_DIR/ALL-SECRETS.txt"
+
+echo "[GLOBAL] grouping secrets"
+
+awk -F':' '
+{
+    file=$1
+    value=$2
+
+    if (!seen[file,value]++) {
+        data[file]=data[file]"\n  - "value
+    }
+}
+END {
+    for (f in data) {
+        print "[Source] "f data[f]"\n"
+    }
+}
+' "$OUTPUT_DIR/ALL-SECRETS.txt" \
+> "$OUTPUT_DIR/ALL-SECRETS-GROUPED.txt"
+
+echo "[GLOBAL] grouped output: ALL-SECRETS-GROUPED.txt"
+
+
 echo "[✓] DONE - HUNT READY 💀"
+echo "[REPORT] generating HTML dashboard..."
+
+REPORT="$OUTPUT_DIR/report.html"
+
+cat <<EOF > "$REPORT"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>CredsHunter Elite Report</title>
+<style>
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: monospace;
+  padding: 20px;
+}
+h1 {
+  color: #ff4d4d;
+}
+.card {
+  background: #161b22;
+  border-radius: 12px;
+  padding: 15px;
+  margin-bottom: 20px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.5);
+}
+.badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  margin: 5px;
+  font-size: 12px;
+}
+.good { background: #238636; }
+.warn { background: #9e6a03; }
+.bad  { background: #da3633; }
+
+pre {
+  background: #0d1117;
+  padding: 10px;
+  overflow-x: auto;
+  border-radius: 8px;
+  max-height: 200px;
+}
+</style>
+</head>
+<body>
+
+<h1>💀 CredsHunter Elite Report</h1>
+<p>Generated: $(date)</p>
+EOF
+
+
+for d in "$OUTPUT_DIR"/*; do
+
+  [ ! -d "$d" ] && continue
+
+  DOMAIN=$(basename "$d")
+
+  URL_COUNT=$(wc -l < "$d/urls.txt" 2>/dev/null || echo 0)
+  PARAM_COUNT=$(wc -l < "$d/params.txt" 2>/dev/null || echo 0)
+  END_COUNT=$(wc -l < "$d/endpoints.txt" 2>/dev/null || echo 0)
+  SECRET_COUNT=$(wc -l < "$d/secrets.txt" 2>/dev/null || echo 0)
+
+  BADGE_CLASS="good"
+  [ "$SECRET_COUNT" -gt 0 ] && BADGE_CLASS="bad"
+
+  echo "<div class='card'>" >> "$REPORT"
+
+  echo "<h2>$DOMAIN</h2>" >> "$REPORT"
+
+  echo "<span class='badge good'>URLs: $URL_COUNT</span>" >> "$REPORT"
+  echo "<span class='badge warn'>Params: $PARAM_COUNT</span>" >> "$REPORT"
+  echo "<span class='badge good'>Endpoints: $END_COUNT</span>" >> "$REPORT"
+  echo "<span class='badge $BADGE_CLASS'>Secrets: $SECRET_COUNT</span>" >> "$REPORT"
+
+  echo "<h3>🔥 High Value</h3><pre>" >> "$REPORT"
+  head -n 20 "$d/highvalue.txt" 2>/dev/null >> "$REPORT"
+  echo "</pre>" >> "$REPORT"
+
+  echo "<h3>🔑 Secrets</h3><pre>" >> "$REPORT"
+  head -n 20 "$d/secrets.txt" 2>/dev/null >> "$REPORT"
+  echo "</pre>" >> "$REPORT"
+
+  echo "<h3>⚡ Endpoints</h3><pre>" >> "$REPORT"
+  head -n 20 "$d/endpoints.txt" 2>/dev/null >> "$REPORT"
+  echo "</pre>" >> "$REPORT"
+
+  echo "</div>" >> "$REPORT"
+
+done
+
+cat <<EOF >> "$REPORT"
+</body>
+</html>
+EOF
+
+echo "[REPORT] done → $REPORT"
