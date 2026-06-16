@@ -1,18 +1,43 @@
 #!/bin/bash
 
-INPUT_FILE="targets.txt"
+INPUT_FILE="" # Dikosongkan untuk validasi wajib di getopts
 OUTPUT_DIR="output"
 THREADS=8
+COOKIE=""
 
-# ✅ arg
+# ✅ Fungsi Help Menu (Menggunakan kutip satu agar contoh lebih bersih tanpa backslash)
+usage() {
+  echo "Usage: $0 -i <targets.txt> [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  -i  Input file containing target URLs (Required)"
+  echo "  -t  Number of concurrent threads (Default: 8)"
+  echo "  -e  Exclude list file (Regex pattern)"
+  echo "  -c  Cookie string for authenticated crawling"
+  echo "  -h  Show this help message"
+  echo ""
+  echo "Example:"
+  # Diubah menggunakan kutip dua agar $0 terbaca dinamis, cookie dibungkus kutip satu (')
+  echo "  $0 -i targets.txt -t 10 -c 'PHPSESSID=ujm2n786gdb7vtt87s6; security=low'"
+  exit 1
+}
 
-while getopts "i:t:e:" opt; do
+# ✅ Update getopts untuk menerima flag -c dan -h
+while getopts "i:t:e:c:h" opt; do
   case $opt in
     i) INPUT_FILE="$OPTARG" ;;
     t) THREADS="$OPTARG" ;;
     e) EXCLUDE_FILE="$OPTARG" ;;
+    c) COOKIE="$OPTARG" ;;
+    h | *) usage ;;
   esac
 done
+
+# ✅ Validasi parameter wajib sebelum eksekusi lanjut
+if [[ -z "$INPUT_FILE" ]]; then
+  echo "[!] Error: Flag -i wajib diisi."
+  usage
+fi
 
 filter_exclude() {
     if [[ -n "$EXCLUDE_REGEX" ]]; then
@@ -24,7 +49,6 @@ filter_exclude() {
 
 export -f filter_exclude
 
-
 EXCLUDE_REGEX=""
 
 if [[ -f "$EXCLUDE_FILE" ]]; then
@@ -33,6 +57,7 @@ if [[ -f "$EXCLUDE_FILE" ]]; then
 fi
 
 export EXCLUDE_REGEX
+export COOKIE # ✅ WAJIB diexport agar bisa dibaca fungsi crawl_target di dalam xargs
 
 
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -57,14 +82,53 @@ crawl_target() {
     DOMAIN=$(echo $URL | sed 's|https\?://||' | cut -d/ -f1)    
     TARGET_DIR="$OUTPUT_DIR/$DOMAIN"
     mkdir -p "$TARGET_DIR/files"
+    FINAL_FILE="$TARGET_DIR/katana.jsonl"
+    FILE_STD="$TARGET_DIR/katana_std.jsonl"
+    FILE_HL="$TARGET_DIR/katana_hl.jsonl"
 
-    FILE="$TARGET_DIR/katana.jsonl"
+    echo "[RUNNING] $DOMAIN (Dual-Engine Mode)"
 
+    # ✅ 1. Siapkan argumen kuki dinamis
+    KATANA_AUTH_ARGS=()
+    if [[ -n "$COOKIE" ]]; then
+        KATANA_AUTH_ARGS=("-H" "Cookie: $COOKIE")
+    fi
 
-    echo "[RUNNING] $DOMAIN"
+    # ✅ 2. AMBIL LOCAL DNS DARI OS SECARA OTOMATIS 🔥
+    # Ini akan mengambil IP seperti 10.2.1.5 atau DNS default target lab Anda
+    LOCAL_DNS=$(grep -m 1 "nameserver" /etc/resolv.conf | awk '{print $2}')
+    
+    # Gabungkan Local DNS dengan DNS Publik sebagai fallback cadangan
+    if [[ -n "$LOCAL_DNS" ]]; then
+        DNS_ARGS=("-r" "$LOCAL_DNS,1.1.1.1,8.8.8.8")
+    else
+        DNS_ARGS=("-r" "1.1.1.1,8.8.8.8")
+    fi
 
-    # ✅ KATANA FULL
-    timeout 5m katana -u "$URL" \
+    # 🚀 ENGINE 1: Standard Mode
+    # Cetak debug command dengan memunculkan tanda kutip kuki secara visual agar siap copas
+    if [[ -n "$COOKIE" ]]; then
+        echo "[DEBUG CMD] Engine 1 (Standard): katana -u \"$URL\" -H \"Cookie: $COOKIE\" ${DNS_ARGS[@]}  -d 5 -jc -jsl -kf all -j -silent -ob -or"
+    else
+        echo "[DEBUG CMD] Engine 1 (Standard): katana -u \"$URL\" ${DNS_ARGS[@]}  -d 5 -jc -jsl -kf all -j -silent -ob -or"
+    fi
+    timeout 3m katana -u "$URL" \
+        "${KATANA_AUTH_ARGS[@]}" \
+        "${DNS_ARGS[@]}" \
+        -d 5 \
+        -jc \
+        -jsl \
+        -kf all \
+        -j \
+        -silent \
+        -ob -or \
+        -o "$FILE_STD" \
+        > /dev/null 2>&1
+
+    # 🚀 ENGINE 2: Headless Mode
+    echo "[DEBUG CMD] Engine 2 (Headless): katana -u \"$URL\" ${DNS_ARGS[@]} -ns -d 5 -jc -jsl -kf all -hl -xhr -system-chrome -system-chrome-path /usr/bin/chromium -no-sandbox -j -silent -ob -or"
+    timeout 3m katana -u "$URL" \
+        "${DNS_ARGS[@]}" \
         -d 5 \
         -jc \
         -jsl \
@@ -77,9 +141,24 @@ crawl_target() {
         -j \
         -silent \
         -ob -or \
-        -o "$FILE" \
+        -o "$FILE_HL" \
         > /dev/null 2>&1
 
+    # 🤝 PROSES MERGE & DE-DUPLICATE LEVEL JSON (Bebas Duplikat Struktural)
+    echo "[MERGE] Combining Standard and Headless results for $DOMAIN"
+    cat "$FILE_STD" "$FILE_HL" 2>/dev/null \
+        | jq -c -s 'unique_by(.url, .request.endpoint)' \
+        | jq -c '.[]' \
+        > "$FINAL_FILE" 2>/dev/null
+
+    # Bersihkan file sampah instansi agar disk lab tidak penuh
+    rm -f "$FILE_STD" "$FILE_HL"
+
+    # Alihkan variabel asal ke file final yang sudah bersih
+    FILE="$FINAL_FILE"
+
+
+    
     mkdir -p "$OUTPUT_DIR/$DOMAIN"
 
     echo "[EXTRACT] $DOMAIN"
@@ -106,12 +185,17 @@ crawl_target() {
      | sort -u > "$TARGET_DIR/fuzz.txt"
 
     echo "[PARAM] $(wc -l < "$TARGET_DIR/params.txt" 2>/dev/null || echo 0) param found"
-    
 
     # ✅ DOWNLOAD CLEAN FILE 🔥
     echo "[DOWNLOAD] $DOMAIN"
 
     COUNT=0
+
+    # ✅ Buat argumen dinamis Curl
+    CURL_AUTH_ARGS=()
+    if [[ -n "$COOKIE" ]]; then
+        CURL_AUTH_ARGS=(-H "Cookie: $COOKIE")
+    fi
 
     while read -r link; do
         echo "$link" | filter_exclude | grep -q . || continue
@@ -132,10 +216,12 @@ crawl_target() {
             EXT=".html"
         fi
 
-        STATUS=$(curl -m 10 -s -o /dev/null -w "%{http_code}" "$link")
+        # ✅ Sisipkan ${CURL_AUTH_ARGS[@]} pada pengecekan status code
+        STATUS=$(curl "${CURL_AUTH_ARGS[@]}" -m 10 -s -o /dev/null -w "%{http_code}" "$link")
 
         if [[ "$STATUS" == "200" ]]; then
-            curl -s "$link" -o "$TARGET_DIR/files/$NAME$EXT"
+            # ✅ Sisipkan ${CURL_AUTH_ARGS[@]} pada proses download file
+            curl "${CURL_AUTH_ARGS[@]}" -s "$link" -o "$TARGET_DIR/files/$NAME$EXT"
             ((COUNT++))
         fi
 
@@ -168,30 +254,101 @@ crawl_target() {
 
 
     # ✅ SENSITIVE DATA 🔥
+    # ─── 1. EKSTRAKSI AWAL (SERAKAH) ───────────────────────────────────────
+    # Menangkap semua kandidat termasuk format JSON blob dan parameter URL
+    > "$TARGET_DIR/secrets_raw.txt"
 
-    # ✅ base secret extraction (key + value)
-
-    grep -rHoEi "(api[_-]?key|token|secret|password|jwt|bearer)[\"'\s:=]+[a-zA-Z0-9_\-\.=#:+/@$]{6,}" \
+    grep -rHoEi "(api[_-]?key|token|secret|password|jwt|bearer)[\"'\s:=]+[a-zA-Z0-9_\-\.=#:+/@\${}\"']{3,}" \
     "$TARGET_DIR/files" "$TARGET_DIR"/*.html 2>/dev/null \
-    > "$TARGET_DIR/secrets.txt"
+    >> "$TARGET_DIR/secrets_raw.txt"
+
+    grep -rHoEi "(token|password|secret|key)=[a-zA-Z0-9_\-\.]+" \
+    "$TARGET_DIR/files" "$TARGET_DIR"/*.html 2>/dev/null \
+    >> "$TARGET_DIR/secrets_raw.txt"
 
     grep -rHoE "eyJ[a-zA-Z0-9_\-\.=]+" "$TARGET_DIR" 2>/dev/null \
-     >> "$TARGET_DIR/secrets.txt"
+    >> "$TARGET_DIR/secrets_raw.txt"
 
-    # ✅ Authorization header (ambil full token)
     grep -rHoEi "Authorization[\"' :]+Bearer[ ]+[^\"'[:space:]]+" \
     "$TARGET_DIR/files" "$TARGET_DIR"/*.html 2>/dev/null \
-    >> "$TARGET_DIR/secrets.txt"
+    >> "$TARGET_DIR/secrets_raw.txt"
+
+    # Rapikan file RAW (urutkan dan hilangkan duplikat teks mentah)
+    if [[ -s "$TARGET_DIR/secrets_raw.txt" ]]; then
+        sort -u "$TARGET_DIR/secrets_raw.txt" -o "$TARGET_DIR/secrets_raw.txt"
+    fi
 
 
-    sort -u "$TARGET_DIR/secrets.txt" \
-     -o "$TARGET_DIR/secrets.txt"
+    # ─── 2. FILTERING UNTUK LAPORAN UTAMA (BERSIH & TAJAM) ─────────────────
+    # Memisahkan data bersih ke file secrets.txt tanpa menghapus file RAW
+    if [[ -s "$TARGET_DIR/secrets_raw.txt" ]]; then
+        grep -viE "(password['\"]?\s*[:=]\s*['\"]?['\"]?$)" "$TARGET_DIR/secrets_raw.txt" \
+        | grep -viE "[:=][\"'\s]*(null|true|false|undefined|void|placeholder|example|xxxxxx)[\"'\s]*$" \
+        | grep -viE "[\"'](text|password|email|number)[\"']" \
+        | sort -u \
+        > "$TARGET_DIR/secrets.txt"
+    else
+        > "$TARGET_DIR/secrets.txt"
+    fi
+    # ─── 3. GENERIC IDENTITY & ROLES MAPPER (DUAL-TRACK) ──────────────────
+    echo "[MINING] Scanning for generic user profiles and authorization maps in $DOMAIN"
+    > "$TARGET_DIR/identities.txt"
+    > "$TARGET_DIR/roles_policy.txt"
+
+    find "$TARGET_DIR/files" "$TARGET_DIR"/*.html -type f 2>/dev/null | while read -r file; do
+        
+        # Jalur 1: Mengendus Profil Pengguna (High Accuracy)
+        grep -E "[\"'](username|email|user_id)[\"']\s*:" "$file" 2>/dev/null | while read -r raw_line; do
+            [[ ${#raw_line} -gt 2000 ]] && continue
+            clean_line=$(echo "$raw_line" | sed 's/^[ \t]*//;s/[ \t]*$//')
+            if echo "$clean_line" | grep -qE "\{.*\}"; then
+                json_part=$(echo "$clean_line" | grep -oE "\{.*\}")
+                if echo "$json_part" | jq . >/dev/null 2>&1; then
+                    echo "=== Profile Struct Found in $(basename "$file") ===" >> "$TARGET_DIR/identities.txt"
+                    echo "$json_part" | jq . >> "$TARGET_DIR/identities.txt"
+                    echo "" >> "$TARGET_DIR/identities.txt"
+                fi
+            fi
+        done
+
+        # Jalur 2: Mengendus Hak Akses & Kebijakan Otorisasi (Potensi Noise)
+        grep -E "[\"'](role|privilege|access_level)[\"']\s*:" "$file" 2>/dev/null | while read -r raw_line; do
+            [[ ${#raw_line} -gt 2000 ]] && continue
+            clean_line=$(echo "$raw_line" | sed 's/^[ \t]*//;s/[ \t]*$//')
+            if echo "$clean_line" | grep -qE "\{.*\}"; then
+                json_part=$(echo "$clean_line" | grep -oE "\{.*\}")
+                if echo "$json_part" | jq . >/dev/null 2>&1; then
+                    echo "=== Auth/Role Map Found in $(basename "$file") ===" >> "$TARGET_DIR/roles_policy.txt"
+                    echo "$json_part" | jq . >> "$TARGET_DIR/roles_policy.txt"
+                    echo "" >> "$TARGET_DIR/roles_policy.txt"
+                fi
+            fi
+        done
+
+    done
+
+    # 🤝 PROSES DEDUPLIKASI KEDUA BERKAS SECARA INDEPENDEN
+    for txt_file in "identities.txt" "roles_policy.txt"; do
+        if [[ -s "$TARGET_DIR/$txt_file" ]]; then
+            awk 'BEGIN{RS="";ORS="\n\n"} !seen[$0]++' "$TARGET_DIR/$txt_file" > "$TARGET_DIR/${txt_file}_clean" 2>/dev/null
+            mv "$TARGET_DIR/${txt_file}_clean" "$TARGET_DIR/$txt_file"
+        fi
+    done
+
+    # ─── 4. SUMMARY GENERATION & STATS ────────────────────────────────────
+    # Ambil total objek unik yang berhasil di-mining berdasarkan header penanda
+    STRUCT_COUNT=$(grep -c "=== Profile Struct" "$TARGET_DIR/identities.txt" 2>/dev/null || echo 0)
+    ROLE_COUNT=$(grep -c "=== Auth/Role Map" "$TARGET_DIR/roles_policy.txt" 2>/dev/null || echo 0)
 
     echo "[DONE] $DOMAIN"
     echo "  URLs        : $(wc -l < "$TARGET_DIR/urls.txt" 2>/dev/null || echo 0)"
     echo "  params      : $(wc -l < "$TARGET_DIR/params.txt" 2>/dev/null || echo 0)"
     echo "  endpoints   : $(wc -l < "$TARGET_DIR/endpoints.txt" 2>/dev/null || echo 0)"
     echo "  highvalue   : $(wc -l < "$TARGET_DIR/highvalue.txt" 2>/dev/null || echo 0)"
+    echo "  Profiles    : $STRUCT_COUNT JSON objects (High-Signal) 👤"
+    echo "  Auth Maps   : $ROLE_COUNT JSON objects (Low-Signal/Roles) 🔑"
+    echo "  secrets (HQ): $(wc -l < "$TARGET_DIR/secrets.txt" 2>/dev/null || echo 0)"
+    echo "  secrets(RAW): $(wc -l < "$TARGET_DIR/secrets_raw.txt" 2>/dev/null || echo 0)"
     echo "  files       : $COUNT"
     echo "-----------------------------"
 
@@ -372,4 +529,4 @@ cat <<EOF >> "$REPORT"
 </html>
 EOF
 
-echo "[REPORT] done → $REPORT"
+echo "[REPORT] done check $REPORT"
